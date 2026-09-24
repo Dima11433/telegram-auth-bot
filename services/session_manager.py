@@ -82,11 +82,13 @@ def create_telethon_client(session_path: Path, proxy: Optional[Dict] = None) -> 
             telethon_proxy = proxy
 
     kwargs = {
-        "device_model": "Desktop",
+        "device_model": "PC 64bit",
         "system_version": "Windows 11",
         "app_version": "5.6.3 x64",
         "lang_code": "ru",
-        "system_lang_code": "ru-RU"
+        "system_lang_code": "ru-RU",
+        "catch_up": False,
+        "flood_sleep_threshold": 60
     }
     if connection_class:
         kwargs["connection"] = connection_class
@@ -294,9 +296,9 @@ async def listen_for_new_code(
 
         last_seen_id = initial_msgs[0].id if (initial_msgs and initial_msgs[0]) else 0
 
-        # Poll every 1.5s until timeout
+        # Poll every 2.5s until timeout (prevents Telegram rate limiting and freeze)
         while (asyncio.get_event_loop().time() - start_time) < timeout:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(2.5)
             try:
                 msgs = await client.get_messages(777000, limit=3)
                 for m in msgs:
