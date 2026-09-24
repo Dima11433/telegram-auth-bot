@@ -578,7 +578,7 @@ def export_session_to_tdata_zip(
             try:
                 conn = sqlite3.connect(session_path)
                 cur = conn.cursor()
-                row = cur.execute("SELECT id FROM entities WHERE id > 0 LIMIT 1").fetchone()
+                row = cur.execute("SELECT id FROM entities WHERE id > 0 AND id != 777000 LIMIT 1").fetchone()
                 if row and row[0]:
                     user_id = int(row[0])
                 conn.close()

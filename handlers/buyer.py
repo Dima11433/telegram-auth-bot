@@ -433,8 +433,11 @@ async def handle_buyer_download_tdata(callback: CallbackQuery):
 
     # Disconnect any open sockets in the bot so Telegram Desktop has exclusive connection
     await disconnect_pooled_client(session_file)
+    # Small pause to let socket fully close before SQLite read
+    await asyncio.sleep(0.5)
 
-    ok, err = export_session_to_tdata_zip(session_file, zip_path, user_id=acc.tg_user_id or 0)
+    # Run sync tdata conversion in thread pool so event loop stays responsive
+    ok, err = await asyncio.to_thread(export_session_to_tdata_zip, session_file, zip_path, acc.tg_user_id or 0)
     if not ok or not zip_path.exists():
         await wait_msg.edit_text(f"❌ Ошибка формирования Tdata: {err}")
         return
@@ -447,12 +450,21 @@ async def handle_buyer_download_tdata(callback: CallbackQuery):
             f"<b>Инструкция по входу:</b>\n"
             f"1. Распакуйте скачанный ZIP архив\n"
             f"2. Поместите папку <code>tdata</code> в папку с <code>Telegram.exe</code>\n"
-            f"3. Запустите Telegram — вы сразу окажетесь внутри аккаунта!"
+            f"3. Запустите Telegram — вы сразу окажетесь внутри аккаунта!\n\n"
+            f"⚠️ <b>Важно:</b> После входа нажмите кнопку <b>«🚪 Выйти ботом с аккаунта»</b> — "
+            f"бот удалит свою сессию и аккаунт станет <b>полностью вашим</b>!"
         ),
         parse_mode=ParseMode.HTML
     )
     try:
         await wait_msg.delete()
+    except Exception:
+        pass
+
+    # Auto-delete the bot's ZIP temp file
+    try:
+        if zip_path.exists():
+            zip_path.unlink()
     except Exception:
         pass
 

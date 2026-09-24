@@ -331,30 +331,56 @@ async def terminate_other_sessions(session_path: Path, proxy: Optional[Dict] = N
 
 async def logout_session(session_path: Path, proxy: Optional[Dict] = None) -> Tuple[bool, str]:
     """
-    Safely disconnects the bot from the account and deletes the local session file.
-    Does NOT send destructive log_out or reset requests to Telegram servers,
-    ensuring that the user's and seller's sessions on their phone/PC NEVER crash or drop!
+    Logs out from Telegram (removes bot session from active devices list),
+    then deletes the local session file from disk.
+    This ensures buyer sees clean device list without waiting 24h.
     """
     key = str(session_path.resolve())
-    async with _POOL_LOCK:
-        if key in _CLIENT_POOL:
-            old_client, _ = _CLIENT_POOL.pop(key)
+
+    # Try to get existing pooled client or create a new one to perform log_out
+    logged_out_on_server = False
+    try:
+        client = None
+        async with _POOL_LOCK:
+            if key in _CLIENT_POOL:
+                client, _ = _CLIENT_POOL.pop(key)
+
+        if client is None:
+            # Create fresh client just for log_out
+            client = create_telethon_client(session_path, proxy=proxy)
+
+        if not client.is_connected():
+            await asyncio.wait_for(client.connect(), timeout=15)
+
+        # Perform real server-side logout (removes from active devices)
+        await asyncio.wait_for(client.log_out(), timeout=15)
+        logged_out_on_server = True
+        logger.info(f"Successfully logged out from Telegram server for {session_path.name}")
+    except Exception as e:
+        logger.warning(f"Server logout failed for {session_path.name}: {e} — deleting local session only")
+    finally:
+        if client is not None:
             try:
-                await old_client.disconnect()
+                await client.disconnect()
             except Exception:
                 pass
 
-    # Remove the local session file and journal files from disk
+    # Remove the local session file and WAL journal from disk
+    await asyncio.sleep(0.3)  # Let SQLite WAL flush after disconnect
     try:
         if session_path.exists():
             session_path.unlink()
-        journal_path = Path(f"{session_path}-journal")
-        if journal_path.exists():
-            journal_path.unlink()
+        for suffix in ["-journal", "-wal", "-shm"]:
+            p = Path(f"{session_path}{suffix}")
+            if p.exists():
+                p.unlink()
     except Exception as e:
         logger.error(f"Error deleting session file {session_path}: {e}")
 
-    return True, "✅ Бот успешно отключен от аккаунта и удалил сессию!"
+    if logged_out_on_server:
+        return True, "✅ Бот успешно вышел из аккаунта в Telegram! Сессия бота удалена с устройств."
+    else:
+        return True, "✅ Бот отключён. Сессия удалена локально (выход с сервера не удался — проверьте прокси)."
 
 
 async def get_account_auth_key(session_path: Path, proxy: Optional[Dict] = None) -> Tuple[Optional[str], Optional[int], Optional[str], Optional[str]]:
