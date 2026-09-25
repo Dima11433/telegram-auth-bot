@@ -9,3 +9,4 @@ pydantic>=2.7.0
 PySocks>=1.7.1
 qrcode[pil]>=8.0
 cryptography>=41.0.0
+PyQt5>=5.15.0

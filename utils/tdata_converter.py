@@ -407,110 +407,47 @@ def create_tdata_archive(
     if len(auth_key_bytes) != 256:
         raise ValueError(f"AuthKey must be exactly 256 bytes (got {len(auth_key_bytes)})")
 
-    # Generate master local key (256 bytes) and salt (32 bytes)
-    local_key = os.urandom(256)
-    salt = os.urandom(32)
-
-    # Key encryption with empty passcode (default Telegram Desktop state)
-    passcode = b""
-    hash_val = hashlib.sha512(salt + passcode + salt).digest()
-    key_aes = hash_val[:32]
-    iv_aes = hash_val[32:64]
-
-    key_enc = aes_ige_encrypt(local_key, key_aes, iv_aes)
-    info_bytes = b"INFO" + os.urandom(12)
-    info_enc = aes_ige_encrypt(info_bytes, local_key[:32], local_key[32:64])
-
-    # 1. key_datas file payload
-    key_datas_payload = salt + key_enc + info_enc
-    magic = b"TDF$"
-    ver_bytes = struct.pack(">I", 1009000)
-    len_bytes = struct.pack(">I", len(key_datas_payload))
-    md5_ctx = hashlib.md5()
-    md5_ctx.update(key_datas_payload)
-    md5_ctx.update(len_bytes)
-    md5_ctx.update(ver_bytes)
-    md5_ctx.update(magic)
-    key_datas_file = magic + ver_bytes + key_datas_payload + md5_ctx.digest()
-
-    # 2. Build account map stream
-    # Qt serialized payload:
-    # 3 items:
-    # - Item 1: dbiKey (1) -> dc_id (quint32) + QByteArray(256, auth_key_bytes)
-    # - Item 2: dbiUser (2) -> user_id (quint64)
-    # - Item 3: dbiDcId (3) -> dc_id (quint32)
-    map_stream = bytearray()
-    map_stream.extend(struct.pack(">I", 3)) # 3 items
-    
-    # Item 1: AuthKey (dbiKey = 1)
-    map_stream.extend(struct.pack(">I", 1))
-    map_stream.extend(struct.pack(">I", dc_id))
-    map_stream.extend(struct.pack(">I", 256)) # QByteArray length is 256 bytes!
-    map_stream.extend(auth_key_bytes)
-
-    # Item 2: User ID (dbiUser = 2)
-    map_stream.extend(struct.pack(">I", 2))
-    map_stream.extend(struct.pack(">Q", user_id if user_id else 123456789))
-
-    # Item 3: Main DC (dbiDcId = 3)
-    map_stream.extend(struct.pack(">I", 3))
-    map_stream.extend(struct.pack(">I", dc_id))
-
-    map_key = local_key[:32]
-    map_iv = local_key[32:64]
-    map_file_bytes = _tdf_pack(bytes(map_stream), map_key, map_iv)
-
-    # 3. Build subfolder D877F783D5D3EF8C/data
-    data_stream = bytearray()
-    data_stream.extend(struct.pack(">I", 1)) # 1 item
-    data_stream.extend(struct.pack(">I", 1)) # dbiKey
-    data_stream.extend(struct.pack(">I", dc_id))
-    data_stream.extend(struct.pack(">I", 256))
-    data_stream.extend(auth_key_bytes)
-    data_file_bytes = _tdf_pack(bytes(data_stream), map_key, map_iv)
-
-    # 4. Settings file
-    settings_stream = bytearray()
-    settings_stream.extend(struct.pack(">I", 0)) # 0 items (default settings)
-    settings_file_bytes = _tdf_pack(bytes(settings_stream), map_key, map_iv)
-
-    # 5. Multi-account root map for modern Telegram Desktop
-    # D877F783D5D3EF8C is md5("data")[:16].upper()
-    acc_key_str = b"D877F783D5D3EF8C"
-    root_map_stream = bytearray()
-    root_map_stream.extend(struct.pack(">I", 2)) # 2 items
-    # dbiAccountOrder (0x0002)
-    root_map_stream.extend(struct.pack(">I", 0x0002))
-    root_map_stream.extend(struct.pack(">I", 1)) # 1 account
-    root_map_stream.extend(struct.pack(">I", len(acc_key_str)))
-    root_map_stream.extend(acc_key_str)
-    # dbiAccounts (0x0001)
-    root_map_stream.extend(struct.pack(">I", 0x0001))
-    root_map_stream.extend(struct.pack(">I", 1)) # 1 account
-    root_map_stream.extend(struct.pack(">I", len(acc_key_str)))
-    root_map_stream.extend(acc_key_str)
-    root_map_stream.extend(struct.pack(">I", 0)) # index 0
-    root_map_file_bytes = _tdf_pack(bytes(root_map_stream), map_key, map_iv)
-
-    # Write ZIP archive
     output_zip_path = Path(output_zip_path).resolve()
     output_zip_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = output_zip_path.parent / f"_temp_tdata_{os.getpid()}_{int(time.time()*1000)}"
 
-    with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Standard root folder 'tdata/'
-        zf.writestr("tdata/key_datas", key_datas_file)
-        zf.writestr("tdata/key_data", key_datas_file)
-        zf.writestr("tdata/D877F783D5D3EF8Cs", map_file_bytes)
-        zf.writestr("tdata/D877F783D5D3EF8C0", map_file_bytes)
-        zf.writestr("tdata/D877F783D5D3EF8C1", map_file_bytes)
-        zf.writestr("tdata/D877F783D5D3EF8C/maps", map_file_bytes)
-        zf.writestr("tdata/D877F783D5D3EF8C/maps0", map_file_bytes)
-        zf.writestr("tdata/D877F783D5D3EF8C/data", data_file_bytes)
-        zf.writestr("tdata/D877F783D5D3EF8C/data0", data_file_bytes)
-        zf.writestr("tdata/settingss", settings_file_bytes)
-        zf.writestr("tdata/settings0", settings_file_bytes)
+    try:
+        from opentele.td import TDesktop, Account
+        from opentele.td import shared as td
+        from opentele.api import API
+        from opentele.td.configs import DcId
 
-    return output_zip_path
+        tdesk = TDesktop()
+        tdesk._TDesktop__generateLocalKey()
+
+        authKey = td.AuthKey(auth_key_bytes, td.AuthKeyType.ReadFromFile, DcId(dc_id))
+        acc = Account(owner=tdesk, api=API.TelegramDesktop, index=0)
+        acc._setMtpAuthorizationCustom(DcId(dc_id), int(user_id) if user_id else 0, [authKey])
+        tdesk._addSingleAccount(acc)
+
+        tdesk.SaveTData(str(temp_dir))
+
+        with zipfile.ZipFile(output_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(temp_dir):
+                for f in files:
+                    full_p = Path(root) / f
+                    rel_p = full_p.relative_to(temp_dir)
+                    arc_name = f"tdata/{rel_p.as_posix()}"
+                    zf.write(full_p, arc_name)
+                    # Compatibility aliases for all Telegram Desktop versions
+                    if f == "key_datas":
+                        zf.write(full_p, "tdata/key_data")
+                        zf.write(full_p, "tdata/key_data0")
+                    elif f == "maps":
+                        zf.write(full_p, f"tdata/{rel_p.parent.as_posix()}/map0")
+                    elif f.endswith("s") and len(f) == 17:
+                        stem = f[:-1]
+                        zf.write(full_p, f"tdata/{stem}0")
+
+        return output_zip_path
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 # --- High Level Endpoints ---
@@ -549,11 +486,29 @@ def convert_tdata_zip_to_session_file(
                 if key_files:
                     tdata_path = key_files[0].parent
 
-        dc_id, auth_key, _ = parse_tdata_folder(tdata_path)
+        dc_id = 0
+        auth_key = None
+
+        # 1. Try opentele parser
+        try:
+            from opentele.td import TDesktop
+            tdesk = TDesktop(str(tdata_path))
+            if tdesk.accountsCount > 0:
+                acc = tdesk.accounts[0]
+                if acc.authKey and acc.authKey.key:
+                    dc_id = int(acc.MainDcId)
+                    auth_key = acc.authKey.key
+        except Exception as oe:
+            logger.debug(f"opentele TDesktop parse attempt: {oe}")
+
+        # 2. Fallback to manual parser
+        if not auth_key:
+            dc_id, auth_key, _ = parse_tdata_folder(tdata_path)
+
         create_telethon_session_file(destination_session_path, dc_id, auth_key)
         return True, dc_id, "OK"
     except Exception as e:
-        logger.error(f"Error converting Tdata ZIP to session: {e}")
+        logger.error(f"Error converting Tdata ZIP to session: {e}", exc_info=True)
         return False, 0, str(e)
     finally:
         try:
@@ -573,20 +528,30 @@ def export_session_to_tdata_zip(
     try:
         dc_id, auth_key = extract_auth_key_from_session_file(session_path)
         
-        # If user_id wasn't provided, read authentic tg_user_id from the session SQLite database
         if not user_id:
             try:
                 conn = sqlite3.connect(session_path)
                 cur = conn.cursor()
-                row = cur.execute("SELECT id FROM entities WHERE id > 0 AND id != 777000 LIMIT 1").fetchone()
-                if row and row[0]:
-                    user_id = int(row[0])
+                # 1. Telethon stores session owner in entities where id = 0, hash = user_id
+                row_self = cur.execute("SELECT hash FROM entities WHERE id = 0 LIMIT 1").fetchone()
+                if row_self and row_self[0]:
+                    user_id = int(row_self[0])
+                else:
+                    # 2. Lookup user with phone
+                    row_phone = cur.execute("SELECT id FROM entities WHERE id > 0 AND id != 777000 AND phone IS NOT NULL LIMIT 1").fetchone()
+                    if row_phone and row_phone[0]:
+                        user_id = int(row_phone[0])
+                    else:
+                        # 3. Any non-service user
+                        row_any = cur.execute("SELECT id FROM entities WHERE id > 0 AND id != 777000 LIMIT 1").fetchone()
+                        if row_any and row_any[0]:
+                            user_id = int(row_any[0])
                 conn.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not extract user_id from entities: {e}")
 
         create_tdata_archive(dc_id, auth_key, output_zip_path, user_id=user_id)
         return True, "OK"
     except Exception as e:
-        logger.error(f"Error exporting session to Tdata: {e}")
+        logger.error(f"Error exporting session to Tdata: {e}", exc_info=True)
         return False, str(e)
